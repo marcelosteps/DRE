@@ -1,0 +1,13 @@
+# Ignorar arquivos de dados (Segurança Financeira)
+*.xlsx
+*.xls
+*.csv
+
+# Ignorar arquivos temporários do sistema
+__pycache__/
+.DS_Store
+Thumbs.db
+
+# Ignorar ambiente virtual
+venv/
+.env
