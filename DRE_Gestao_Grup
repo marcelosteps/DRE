@@ -1,0 +1,147 @@
+import pandas as pd
+import xlsxwriter
+from datetime import date, timedelta
+
+# Configurações Iniciais
+lojas = [f"Loja {i:02d}" for i in range(1, 7)]
+meses = pd.date_range(start='2026-01-01', periods=12, freq='MS')
+categorias_dre = [
+    # (Nome, Tipo de Linha, Nível de Identação)
+    ("Receita Bruta", "input", 0),
+    ("(-) Impostos", "input", 0),
+    ("(=) Receita Líquida", "calc", 0), # Receita - Impostos
+    ("(-) CMV / CPV", "input", 0),
+    ("(=) Lucro Bruto", "calc", 0), # Rec. Liq - CMV
+    ("(-) Despesas Variáveis", "input", 0),
+    ("(=) Margem de Contribuição", "calc", 0), # Lucro Bruto - Var
+    ("(-) Despesas Fixas", "input", 0),
+    ("(=) EBITDA", "calc", 1), # Margem - Fixas
+    ("(-) Depreciação/Amort.", "input", 0),
+    ("(=) Resultado Operacional (EBIT)", "calc", 1),
+    ("(+/-) Resultado Financeiro", "input", 0),
+    ("(=) Lucro Líquido", "calc", 2)
+]
+
+# Criação do Arquivo
+filename = 'DRE_Gestao_Grupo.xlsx'
+writer = pd.ExcelWriter(filename, engine='xlsxwriter')
+workbook = writer.book
+
+# Formatos
+fmt_header = workbook.add_format({'bold': True, 'align': 'center', 'bg_color': '#1F4E78', 'font_color': 'white', 'border': 1})
+fmt_currency = workbook.add_format({'num_format': 'R$ #,##0', 'border': 1})
+fmt_date = workbook.add_format({'num_format': 'dd/mm/yy', 'border': 1})
+fmt_bold = workbook.add_format({'bold': True, 'bg_color': '#D9E1F2', 'border': 1})
+fmt_input = workbook.add_format({'bg_color': '#FFFFFF', 'border': 1}) # Branco para input
+
+# ---------------------------------------------------------
+# 1. ABA: BD_Lancamentos (Base de Dados)
+# ---------------------------------------------------------
+df_bd = pd.DataFrame(columns=['Data', 'Loja', 'Grupo DRE', 'Subcategoria', 'Descrição', 'Valor (R$)'])
+df_bd.to_excel(writer, sheet_name='BD_Lancamentos', index=False)
+ws_bd = writer.sheets['BD_Lancamentos']
+
+# Formatar BD
+ws_bd.set_column('A:A', 12, fmt_date) # Data
+ws_bd.set_column('B:C', 20)           # Loja / Grupo
+ws_bd.set_column('D:E', 30)           # Subcat / Desc
+ws_bd.set_column('F:F', 15, fmt_currency) # Valor
+
+# Exemplo de Dados para teste
+ws_bd.write_row(1, 0, [date(2026, 1, 5), "Loja 01", "Receita Bruta", "Venda Balcão", "Cliente X", 10000], fmt_date)
+ws_bd.write_row(2, 0, [date(2026, 1, 10), "Loja 01", "(-) Despesas Fixas", "Aluguel", "Imobiliária", 2000], fmt_date)
+
+# ---------------------------------------------------------
+# 2. ABAS: DRE INDIVIDUAL (Loja 01 a 06) + CONSOLIDADO
+# ---------------------------------------------------------
+abas_dre = lojas + ['CONSOLIDADO']
+
+for nome_aba in abas_dre:
+    # Cria a aba mas não escreve dados via Pandas, faremos manual para inserir fórmulas
+    ws = workbook.add_worksheet(nome_aba)
+    
+    # Cabeçalhos de Data (Jan a Dez)
+    ws.write(2, 0, "DRE - PLANO DE CONTAS", fmt_header)
+    for i, mes in enumerate(meses):
+        ws.write_datetime(2, i+1, mes, fmt_header)
+        ws.set_column(i+1, i+1, 15) # Largura coluna mês
+    
+    ws.set_column(0, 0, 35) # Largura coluna categorias
+
+    # Construção das Linhas e Fórmulas
+    row = 3
+    mapa_linhas = {} # Para guardar onde está cada item e fazer calculos (Ex: Rec Liq = Linha X - Linha Y)
+
+    for categoria, tipo, nivel in categorias_dre:
+        mapa_linhas[categoria] = row + 1 # Guarda o número da linha no Excel (base 1)
+        
+        # Formatação Visual da Linha
+        fmt_atual = fmt_bold if tipo == 'calc' else fmt_input
+        ws.write(row, 0, categoria, fmt_atual)
+
+        # Preenchimento das Colunas de Mês
+        for col_idx, mes in enumerate(meses):
+            col_excel = xlsxwriter.utility.xl_col_to_name(col_idx + 1) # B, C, D...
+            
+            if tipo == 'input':
+                # FÓRMULA MÁGICA: SOMASES
+                # Lógica: Se for Consolidado, não filtra Loja. Se for Loja X, filtra.
+                
+                # Intervalos na BD
+                rng_valor = "BD_Lancamentos!$F:$F"
+                rng_data = "BD_Lancamentos!$A:$A"
+                rng_grupo = "BD_Lancamentos!$C:$C"
+                rng_loja = "BD_Lancamentos!$B:$B"
+                
+                # Datas de início e fim do mês da coluna atual
+                data_ini = f'DATE({mes.year},{mes.month},1)'
+                data_fim = f'EOMONTH(DATE({mes.year},{mes.month},1),0)'
+
+                if nome_aba == 'CONSOLIDADO':
+                    formula = f'=SUMIFS({rng_valor}, {rng_grupo}, $A{row+1}, {rng_data}, ">="&{col_excel}$3, {rng_data}, "<="&EOMONTH({col_excel}$3,0))'
+                else:
+                    formula = f'=SUMIFS({rng_valor}, {rng_loja}, "{nome_aba}", {rng_grupo}, $A{row+1}, {rng_data}, ">="&{col_excel}$3, {rng_data}, "<="&EOMONTH({col_excel}$3,0))'
+                
+                ws.write_formula(row, col_idx + 1, formula, fmt_currency)
+
+            elif tipo == 'calc':
+                # Lógica de Cálculo das Linhas
+                # Precisamos saber o endereço das linhas anteriores
+                try:
+                    r_bruta = f'{col_excel}{mapa_linhas["Receita Bruta"]}'
+                    r_imp = f'{col_excel}{mapa_linhas["(-) Impostos"]}'
+                    r_liq = f'{col_excel}{mapa_linhas["(=) Receita Líquida"]}'
+                    r_cmv = f'{col_excel}{mapa_linhas["(-) CMV / CPV"]}'
+                    r_lucro_bruto = f'{col_excel}{mapa_linhas["(=) Lucro Bruto"]}'
+                    r_var = f'{col_excel}{mapa_linhas["(-) Despesas Variáveis"]}'
+                    r_margem = f'{col_excel}{mapa_linhas["(=) Margem de Contribuição"]}'
+                    r_fixas = f'{col_excel}{mapa_linhas["(-) Despesas Fixas"]}'
+                    r_ebitda = f'{col_excel}{mapa_linhas["(=) EBITDA"]}'
+                    r_dep = f'{col_excel}{mapa_linhas["(-) Depreciação/Amort."]}'
+                    r_ebit = f'{col_excel}{mapa_linhas["(=) Resultado Operacional (EBIT)"]}'
+                    r_fin = f'{col_excel}{mapa_linhas["(+/-) Resultado Financeiro"]}'
+
+                    if categoria == "(=) Receita Líquida":
+                        f_calc = f'={r_bruta}-{r_imp}'
+                    elif categoria == "(=) Lucro Bruto":
+                        f_calc = f'={r_liq}-{r_cmv}'
+                    elif categoria == "(=) Margem de Contribuição":
+                        f_calc = f'={r_lucro_bruto}-{r_var}'
+                    elif categoria == "(=) EBITDA":
+                        f_calc = f'={r_margem}-{r_fixas}'
+                    elif categoria == "(=) Resultado Operacional (EBIT)":
+                        f_calc = f'={r_ebitda}-{r_dep}'
+                    elif categoria == "(=) Lucro Líquido":
+                        f_calc = f'={r_ebit}+{r_fin}'
+                    else:
+                        f_calc = "0"
+                    
+                    ws.write_formula(row, col_idx + 1, f_calc, fmt_bold)
+                except:
+                    ws.write(row, col_idx + 1, 0, fmt_bold)
+
+        row += 1
+
+# Fechar e Salvar
+writer.close()
+print(f"Arquivo '{filename}' gerado com sucesso!")
